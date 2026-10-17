@@ -1,0 +1,422 @@
+name: Build Lecture Focus APK v2
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate Android Project Files
+        run: |
+          mkdir -p app/src/main/java/com/focus/lecture
+          mkdir -p app/src/main/res/xml
+
+          echo 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }' > settings.gradle
+          echo 'dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }' >> settings.gradle
+          echo 'rootProject.name = "LectureFocus"' >> settings.gradle
+          echo 'include ":app"' >> settings.gradle
+
+          echo 'plugins { id "com.android.application" version "8.3.0" apply false }' > build.gradle
+
+          cat << 'EOF' > app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.focus.lecture'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.focus.lecture"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName "2.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeViewClicked"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="80" />
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <application
+                  android:icon="@android:drawable/ic_lock_idle_lock"
+                  android:label="تركيز المحاضرة"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:resizeableActivity="false">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".TrapActivity"
+                      android:exported="false"
+                      android:taskAffinity="com.focus.lecture.trap"
+                      android:excludeFromRecents="true"
+                      android:noHistory="true" />
+                  <service
+                      android:name=".FocusService"
+                      android:exported="true"
+                      android:label="خدمة تركيز المحاضرة"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/focus/lecture/TrapActivity.java
+          package com.focus.lecture;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          public class TrapActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  overridePendingTransition(0, 0);
+                  new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                      Intent intent = new Intent(TrapActivity.this, MainActivity.class);
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                      startActivity(intent);
+                      finish();
+                      overridePendingTransition(0, 0);
+                  }, 50);
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/focus/lecture/FocusService.java
+          package com.focus.lecture;
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageManager;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.view.inputmethod.InputMethodInfo;
+          import android.view.inputmethod.InputMethodManager;
+          import java.util.List;
+          public class FocusService extends AccessibilityService {
+              private long lastBlockTime = 0;
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  if (event == null || event.getPackageName() == null) return;
+                  SharedPreferences prefs = getSharedPreferences("focus_prefs", MODE_PRIVATE);
+                  long endTime = prefs.getLong("end_time", 0);
+                  long now = System.currentTimeMillis();
+                  if (now >= endTime) return;
+                  String pkg = event.getPackageName().toString();
+                  boolean allowWhatsapp = prefs.getBoolean("allow_whatsapp", true);
+                  if (isAllowed(pkg, allowWhatsapp, prefs)) return;
+                  if (now < prefs.getLong("launch_grace_until", 0)) return;
+                  if (now - lastBlockTime < 250) return;
+                  lastBlockTime = now;
+                  performGlobalAction(GLOBAL_ACTION_BACK);
+                  Intent intent = new Intent(this, TrapActivity.class);
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                  startActivity(intent);
+              }
+              private boolean isAllowed(String pkg, boolean allowWhatsapp, SharedPreferences prefs) {
+                  if (pkg.equals(getPackageName()) || pkg.equals("com.android.systemui")) return true;
+                  String savedVisha = prefs.getString("visha_pkg", "");
+                  if (!savedVisha.isEmpty() && pkg.equals(savedVisha)) return true;
+                  String lower = pkg.toLowerCase();
+                  if (pkg.equals("com.nebula.mamu") || pkg.equals("com.transsion.magicshow") || pkg.equals("com.transsion.vishaplayerhd") || lower.contains("visha") || lower.contains("nebula.mamu")) {
+                      prefs.edit().putString("visha_pkg", pkg).apply();
+                      return true;
+                  }
+                  if (allowWhatsapp && (pkg.equals("com.whatsapp") || pkg.equals("com.whatsapp.w4b") || lower.contains("whatsapp"))) return true;
+                  if (lower.contains("inputmethod") || lower.contains("keyboard") || lower.contains("gboard") || lower.contains("incallui") || lower.contains("dialer") || lower.contains("permissioncontroller")) return true;
+                  try {
+                      PackageManager pm = getPackageManager();
+                      ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                      String label = pm.getApplicationLabel(ai).toString().toLowerCase();
+                      if (label.contains("visha") || label.contains("فيشا")) {
+                          prefs.edit().putString("visha_pkg", pkg).apply();
+                          return true;
+                      }
+                  } catch (Exception ignored) {}
+                  try {
+                      InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                      if (imm != null) {
+                          List<InputMethodInfo> imis = imm.getEnabledInputMethodList();
+                          for (InputMethodInfo imi : imis) {
+                              if (pkg.equals(imi.getPackageName())) return true;
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  return false;
+              }
+              @Override
+              public void onInterrupt() {}
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/focus/lecture/MainActivity.java
+          package com.focus.lecture;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.Settings;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.util.List;
+          import java.util.Locale;
+          public class MainActivity extends Activity {
+              private SharedPreferences prefs;
+              private TextView statusText;
+              private EditText minutesInput;
+              private CheckBox whatsappCheck;
+              private Button startBtn, emergencyBtn;
+              private int emergencyClicks = 0;
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private final Runnable timerRunnable = new Runnable() {
+                  @Override
+                  public void run() {
+                      updateUI();
+                      handler.postDelayed(this, 1000);
+                  }
+              };
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  overridePendingTransition(0, 0);
+                  prefs = getSharedPreferences("focus_prefs", MODE_PRIVATE);
+                  detectAndSaveVishaPkg();
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.setBackgroundColor(Color.parseColor("#121212"));
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setGravity(Gravity.CENTER);
+                  layout.setPadding(50, 60, 50, 60);
+                  TextView title = new TextView(this);
+                  title.setText("🎓 وضع تركيز المحاضرة v2");
+                  title.setTextSize(24);
+                  title.setTextColor(Color.WHITE);
+                  title.setGravity(Gravity.CENTER);
+                  layout.addView(title);
+                  statusText = new TextView(this);
+                  statusText.setTextSize(20);
+                  statusText.setTextColor(Color.parseColor("#4CAF50"));
+                  statusText.setGravity(Gravity.CENTER);
+                  statusText.setPadding(0, 30, 0, 30);
+                  layout.addView(statusText);
+                  minutesInput = new EditText(this);
+                  minutesInput.setHint("مدة المحاضرة بالدقائق (مثلاً 5)");
+                  minutesInput.setHintTextColor(Color.GRAY);
+                  minutesInput.setTextColor(Color.WHITE);
+                  minutesInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  minutesInput.setGravity(Gravity.CENTER);
+                  minutesInput.setText("5");
+                  layout.addView(minutesInput);
+                  whatsappCheck = new CheckBox(this);
+                  whatsappCheck.setText("السماح بفتح WhatsApp أثناء المحاضرة");
+                  whatsappCheck.setTextColor(Color.WHITE);
+                  whatsappCheck.setChecked(prefs.getBoolean("allow_whatsapp", true));
+                  whatsappCheck.setPadding(20, 30, 20, 30);
+                  layout.addView(whatsappCheck);
+                  startBtn = new Button(this);
+                  startBtn.setText("🔒 ابدأ القفل الآن");
+                  startBtn.setBackgroundColor(Color.parseColor("#1E88E5"));
+                  startBtn.setTextColor(Color.WHITE);
+                  startBtn.setOnClickListener(v -> startFocusSession());
+                  layout.addView(startBtn);
+                  Button openVishaBtn = new Button(this);
+                  openVishaBtn.setText("🎬 فتح Visha Player");
+                  openVishaBtn.setOnClickListener(v -> launchVisha());
+                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  params.setMargins(0, 40, 0, 15);
+                  layout.addView(openVishaBtn, params);
+                  Button openWhatsappBtn = new Button(this);
+                  openWhatsappBtn.setText("💬 فتح WhatsApp");
+                  openWhatsappBtn.setOnClickListener(v -> launchWhatsApp());
+                  layout.addView(openWhatsappBtn);
+                  emergencyBtn = new Button(this);
+                  emergencyBtn.setText("فك القفل للطوارئ (اضغط 100 مرة)");
+                  emergencyBtn.setBackgroundColor(Color.parseColor("#333333"));
+                  emergencyBtn.setTextColor(Color.LTGRAY);
+                  emergencyBtn.setOnClickListener(v -> handleEmergencyClick());
+                  LinearLayout.LayoutParams emParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  emParams.setMargins(0, 70, 0, 0);
+                  layout.addView(emergencyBtn, emParams);
+                  scroll.addView(layout);
+                  setContentView(scroll);
+              }
+              private String detectAndSaveVishaPkg() {
+                  PackageManager pm = getPackageManager();
+                  String[] known = {"com.nebula.mamu", "com.transsion.magicshow", "com.transsion.vishaplayerhd"};
+                  for (String pkg : known) {
+                      if (pm.getLaunchIntentForPackage(pkg) != null) {
+                          prefs.edit().putString("visha_pkg", pkg).apply();
+                          return pkg;
+                      }
+                  }
+                  for (ApplicationInfo app : pm.getInstalledApplications(0)) {
+                      String label = pm.getApplicationLabel(app).toString().toLowerCase();
+                      String pkgName = app.packageName.toLowerCase();
+                      if (pkgName.contains("visha") || pkgName.contains("nebula.mamu") || label.contains("visha") || label.contains("فيشا")) {
+                          if (pm.getLaunchIntentForPackage(app.packageName) != null) {
+                              prefs.edit().putString("visha_pkg", app.packageName).apply();
+                              return app.packageName;
+                          }
+                      }
+                  }
+                  return "";
+              }
+              private void startFocusSession() {
+                  if (!isAccessibilityEnabled()) {
+                      Toast.makeText(this, "فعّل (خدمة تركيز المحاضرة) أولاً من الإعدادات", Toast.LENGTH_LONG).show();
+                      startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                      return;
+                  }
+                  String input = minutesInput.getText().toString().trim();
+                  if (input.isEmpty()) return;
+                  int mins = Integer.parseInt(input);
+                  if (mins <= 0 || mins > 180) {
+                      Toast.makeText(this, "اختر وقتاً بين 1 و 180 دقيقة فقط", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  long endTime = System.currentTimeMillis() + (mins * 60L * 1000L);
+                  prefs.edit().putLong("end_time", endTime).putBoolean("allow_whatsapp", whatsappCheck.isChecked()).apply();
+                  emergencyClicks = 0;
+                  updateUI();
+                  launchVisha();
+              }
+              private void handleEmergencyClick() {
+                  if (System.currentTimeMillis() >= prefs.getLong("end_time", 0)) return;
+                  emergencyClicks++;
+                  int remaining = 100 - emergencyClicks;
+                  if (remaining <= 0) {
+                      prefs.edit().putLong("end_time", 0).apply();
+                      emergencyClicks = 0;
+                      Toast.makeText(this, "تم فك القفل!", Toast.LENGTH_SHORT).show();
+                      updateUI();
+                  } else {
+                      emergencyBtn.setText("فك القفل للطوارئ (متبقي " + remaining + " ضغطة)");
+                  }
+              }
+              private void updateUI() {
+                  long remMs = prefs.getLong("end_time", 0) - System.currentTimeMillis();
+                  if (remMs > 0) {
+                      long mins = (remMs / 1000) / 60;
+                      long secs = (remMs / 1000) % 60;
+                      statusText.setText(String.format(Locale.US, "⏳ متبقي على انتهاء المحاضرة: %02d:%02d", mins, secs));
+                      statusText.setTextColor(Color.parseColor("#FFCA28"));
+                      minutesInput.setEnabled(false);
+                      whatsappCheck.setEnabled(false);
+                      startBtn.setEnabled(false);
+                  } else {
+                      statusText.setText("✅ لا توجد جلسة نشطة حالياً");
+                      statusText.setTextColor(Color.parseColor("#4CAF50"));
+                      minutesInput.setEnabled(true);
+                      whatsappCheck.setEnabled(true);
+                      startBtn.setEnabled(true);
+                      emergencyBtn.setText("فك القفل للطوارئ (اضغط 100 مرة)");
+                  }
+              }
+              private void launchVisha() {
+                  String pkg = detectAndSaveVishaPkg();
+                  if (!pkg.isEmpty()) {
+                      Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
+                      if (intent != null) {
+                          prefs.edit().putLong("launch_grace_until", System.currentTimeMillis() + 2500).apply();
+                          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                          startActivity(intent);
+                          return;
+                      }
+                  }
+                  Toast.makeText(this, "لم يتم العثور على تطبيق Visha Player", Toast.LENGTH_SHORT).show();
+              }
+              private void launchWhatsApp() {
+                  if (System.currentTimeMillis() < prefs.getLong("end_time", 0) && !prefs.getBoolean("allow_whatsapp", true)) {
+                      Toast.makeText(this, "الواتساب غير مسموح به في هذه الجلسة!", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  PackageManager pm = getPackageManager();
+                  Intent intent = pm.getLaunchIntentForPackage("com.whatsapp");
+                  if (intent == null) intent = pm.getLaunchIntentForPackage("com.whatsapp.w4b");
+                  if (intent != null) {
+                      prefs.edit().putLong("launch_grace_until", System.currentTimeMillis() + 2000).apply();
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                      startActivity(intent);
+                  } else {
+                      Toast.makeText(this, "لم يتم العثور على WhatsApp", Toast.LENGTH_SHORT).show();
+                  }
+              }
+              private boolean isAccessibilityEnabled() {
+                  String enabled = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                  return enabled != null && enabled.contains(getPackageName() + "/" + FocusService.class.getName());
+              }
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  handler.post(timerRunnable);
+              }
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  handler.removeCallbacks(timerRunnable);
+              }
+          }
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LectureFocus-APK-v2
+          path: app/build/outputs/apk/debug/app-debug.apk
